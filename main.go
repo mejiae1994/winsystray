@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -227,7 +226,7 @@ func main() {
 	}
 	//before we run we probably need a channel to collect commands from the menu actions
 
-	commands = make(chan string, 1)
+	commands = make(chan string, 10)
 
 	signals := make(chan os.Signal, 1)
 	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
@@ -269,8 +268,6 @@ func main() {
 	msg := &winMsg{}
 	for {
 		ret, _, err := procGetMessage.Call(uintptr(unsafe.Pointer(msg)), 0, 0, 0)
-
-		time.Sleep(time.Millisecond * 200)
 
 		switch int32(ret) {
 		case -1:
