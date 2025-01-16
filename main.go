@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -62,6 +63,8 @@ const (
 	NIIF_NONE      = 0x00000000
 	NIS_HIDDEN     = 0x00000001
 	NIS_SHAREDICON = 0x00000002
+
+	SW_HIDE = 0
 )
 
 var (
@@ -83,6 +86,7 @@ var (
 	procDestroyMenu         = modUser32.NewProc("DestroyMenu")
 	procAppendMenu          = modUser32.NewProc("AppendMenuW")
 	procSetForegroundWindow = modUser32.NewProc("SetForegroundWindow")
+	procShowWindow          = modUser32.NewProc("ShowWindow")
 	procTrackPopupMenu      = modUser32.NewProc("TrackPopupMenu")
 	procPostMessage         = modUser32.NewProc("PostMessageW")
 	procPostQuitMessage     = modUser32.NewProc("PostQuitMessage")
@@ -90,6 +94,7 @@ var (
 	procDispatchMessage     = modUser32.NewProc("DispatchMessageW")
 	hInst                   windows.Handle
 	hWnd                    windows.HWND
+	mu                      sync.Mutex
 	commands                chan string
 )
 
@@ -141,31 +146,35 @@ type notifyIconData struct {
 
 func TranslateMessage(msg *winMsg) {
 	fmt.Println("TranslateMessage function")
-	ret, _, _ := procTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
-	if ret == 0 {
-		fmt.Println("TranslateMessage failed")
-	}
+	procTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
 }
 
 func DispatchMessage(msg *winMsg) {
 	fmt.Println("DispatchMessage function")
-	ret, _, _ := procDispatchMessage.Call(uintptr(unsafe.Pointer(msg)))
-	if ret == 0 {
-		fmt.Println("DispatchMessage failed")
-	}
+	procDispatchMessage.Call(uintptr(unsafe.Pointer(msg)))
 }
 
-func PostMessage(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) error {
-	ret, _, err := modUser32.NewProc("PostMessageW").Call(
+func postMessage(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) bool {
+	ret, _, _ := procPostMessage.Call(
 		uintptr(hwnd),
 		uintptr(msg),
 		wParam,
-		lParam,
-	)
-	if ret == 0 {
-		return err
+		lParam)
+
+	return ret != 0
+}
+
+func getMessage(msg *winMsg, hWnd windows.HWND, min, max uint32) int {
+	ret, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(msg)), uintptr(hWnd), uintptr(min), uintptr(max))
+	return int(ret)
+}
+
+func runMessageLoop() {
+	msg := &winMsg{}
+	for getMessage(msg, hWnd, 0, 0) > 0 {
+		TranslateMessage(msg)
+		DispatchMessage(msg)
 	}
-	return nil
 }
 
 func main() {
@@ -245,14 +254,10 @@ func main() {
 			case <-signals:
 				//send window handle a message to close the message loop
 				fmt.Println("Signal received")
-				boolRet, _, err := procPostMessage.Call(
-					uintptr(hWnd),
-					WM_CLOSE,
-					0,
-					0,
-				)
-				if boolRet == 0 {
-					fmt.Printf("PostMessage Failed: %v", err)
+				sucess := postMessage(hWnd, WM_CLOSE, 0, 0)
+
+				if !sucess {
+					fmt.Println("PostMessage to close window failed")
 				}
 
 				if hWnd != 0 {
@@ -265,49 +270,35 @@ func main() {
 		}
 	}()
 
-	msg := &winMsg{}
-	for {
-		ret, _, err := procGetMessage.Call(uintptr(unsafe.Pointer(msg)), 0, 0, 0)
-
-		switch int32(ret) {
-		case -1:
-			fmt.Println("Message failed error:", err)
-			return
-		case 0:
-			fmt.Println("winMessage returned 0, exiting")
-			return
-		default:
-			TranslateMessage(msg)
-			DispatchMessage(msg)
-		}
-	}
+	runMessageLoop()
 }
 
 func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uintptr) {
 	switch msg {
 	case WM_DESTROY:
 		fmt.Println("WM_DESTROY received")
-		defer procPostQuitMessage.Call(uintptr(int32(0)))
+		procPostQuitMessage.Call(uintptr(int32(0)))
 		fallthrough
 	case WM_ENDSESSION:
+		fmt.Println("WM_ENDSESSION received")
 		removeTrayIcon(hwnd)
 	case WM_TRAYICON: // WM_USER + 1
 		// is this breaking the application?
 		switch lParam {
 		case WM_MOUSEMOVE, WM_LBUTTONDOWN:
 			// Do nothing
-		case WM_RBUTTONUP, WM_LBUTTONUP:
-			log.Println("Right button up received")
+		case WM_RBUTTONUP:
+			fmt.Println("Right button up received")
 			showMenu()
 		case 0x404:
 			// Do nothing
 		default:
-			fmt.Println("Unknown mouse event received")
+			fmt.Printf("Unknown mouse event received: %d\n", lParam)
 		}
-		fmt.Println("WM_TRAYICON received")
 	case WM_COMMAND:
 		switch int32(wParam) {
 		case IDM_OPEN_UI:
+			fmt.Printf("opened the UI")
 			select {
 			case commands <- "OpenUI":
 			// should not happen but in case not listening
@@ -316,12 +307,13 @@ func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uin
 			}
 		case IDM_EXIT:
 			log.Println("Exit clicked")
-			PostMessage(hwnd, WM_CLOSE, 0, 0)
+			postMessage(hwnd, WM_CLOSE, 0, 0)
 		default:
 			fmt.Println("Unknown command received")
 		}
 	case WM_CLOSE:
-		destroyWindow(hwnd)
+		fmt.Println("WM_CLOSE received")
+		destroyWindow(hWnd)
 	default:
 		lResult = defWindowProc(hwnd, msg, wParam, lParam)
 	}
@@ -362,21 +354,13 @@ func addTrayIcon(hwnd windows.HWND) error {
 	return nil
 }
 
+var (
+	// Add menu items
+	openUIText, _ = windows.UTF16PtrFromString("Open UI")
+	exitText, _   = windows.UTF16PtrFromString("Exit")
+)
+
 func showMenu() {
-	// Get cursor position
-	pt := POINT{}
-	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
-
-	// Set window as foreground
-	procSetForegroundWindow.Call(uintptr(hWnd))
-
-	// Create popup menu
-	hMenu, _, _ := procCreatePopupMenu.Call()
-	if hMenu == 0 {
-		return
-	}
-	defer procDestroyMenu.Call(hMenu)
-
 	// Menu flags
 	const (
 		MF_STRING       = 0x00000000
@@ -384,11 +368,16 @@ func showMenu() {
 		TPM_RIGHTALIGN  = 0x0008
 		TPM_BOTTOMALIGN = 0x0020
 		TPM_RIGHTBUTTON = 0x0002
+		TPM_NONOTIFY    = 0x0080
+		TPM_RETURNCMD   = 0x0100
+		TPM_LEFTALIGN   = 0x0000 //
 	)
 
-	// Add menu items
-	openUIText, _ := windows.UTF16PtrFromString("Open UI")
-	exitText, _ := windows.UTF16PtrFromString("Exit")
+	// Create popup menu
+	hMenu, _, _ := procCreatePopupMenu.Call()
+	if hMenu == 0 {
+		return
+	}
 
 	procAppendMenu.Call(
 		hMenu,
@@ -411,16 +400,35 @@ func showMenu() {
 		uintptr(unsafe.Pointer(exitText)),
 	)
 
+	// Get cursor position
+	pt := POINT{}
+	procGetCursorPos.Call(uintptr(unsafe.Pointer(&pt)))
+
+	// introducing this makes it so the menu doesn't open again when the cursor is over it
+	mu.Lock()
+	boolRet, _, err := procSetForegroundWindow.Call(uintptr(hWnd))
+	if boolRet == 0 {
+		fmt.Println("SetForegroundWindow failed: ", err)
+	}
+
 	// Track popup menu - let Windows handle the command messages
-	procTrackPopupMenu.Call(
+	// this blocks and the program will not listen to clicks outside the menu to close it
+	boolRet, _, err = procTrackPopupMenu.Call(
 		hMenu,
-		uintptr(TPM_RIGHTBUTTON),
+		uintptr(TPM_BOTTOMALIGN|TPM_LEFTALIGN|TPM_RIGHTBUTTON),
 		uintptr(pt.X),
 		uintptr(pt.Y),
 		0,
 		uintptr(hWnd),
 		0,
 	)
+
+	if boolRet == 0 {
+		fmt.Println("TrackPopupMenu failed: ", err)
+	}
+	mu.Unlock()
+	fmt.Println("TrackPopupMenu returned: ", boolRet)
+	procDestroyMenu.Call(hMenu)
 }
 
 func removeTrayIcon(hwnd windows.HWND) error {
@@ -494,14 +502,13 @@ func createWindowEx(exStyle uint32, className, windowName *uint16, style uint32,
 	hwnd := windows.HWND(ret)
 
 	// Hide the window but keep it active
-	procShowWindow := modUser32.NewProc("ShowWindow")
-	const SW_HIDE = 0
 	procShowWindow.Call(uintptr(hwnd), uintptr(SW_HIDE))
 
 	return hwnd, nil
 }
 
 func defWindowProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) uintptr {
+	fmt.Printf("DefWindowProc: %d\n", msg)
 	ret, _, _ := procDefWindowProc.Call(uintptr(hwnd), uintptr(msg), wParam, lParam)
 	return ret
 }
