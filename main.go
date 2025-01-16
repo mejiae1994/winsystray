@@ -145,12 +145,10 @@ type notifyIconData struct {
 }
 
 func TranslateMessage(msg *winMsg) {
-	fmt.Println("TranslateMessage function")
 	procTranslateMessage.Call(uintptr(unsafe.Pointer(msg)))
 }
 
 func DispatchMessage(msg *winMsg) {
-	fmt.Println("DispatchMessage function")
 	procDispatchMessage.Call(uintptr(unsafe.Pointer(msg)))
 }
 
@@ -250,12 +248,25 @@ func main() {
 					// if err := cmd.Start(); err != nil {
 					// 	log.Printf("Error starting browser: %v", err)
 					// }
+				} else if cmd == "Exit" {
+					fmt.Println("Command to exit received")
+					sucess := postMessage(hWnd, WM_CLOSE, 0, 0)
+					if !sucess {
+						fmt.Println("PostMessage to close window failed")
+					}
+
+					if hWnd != 0 {
+						removeTrayIcon(hWnd)
+						destroyWindow(hWnd)
+						os.Exit(0)
+					}
+					return
+
 				}
 			case <-signals:
 				//send window handle a message to close the message loop
 				fmt.Println("Signal received")
 				sucess := postMessage(hWnd, WM_CLOSE, 0, 0)
-
 				if !sucess {
 					fmt.Println("PostMessage to close window failed")
 				}
@@ -273,15 +284,16 @@ func main() {
 	runMessageLoop()
 }
 
+func postQuitMessage(n uint32) {
+	procPostQuitMessage.Call(uintptr(int32(n)))
+}
+
 func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uintptr) {
 	switch msg {
 	case WM_DESTROY:
 		fmt.Println("WM_DESTROY received")
-		procPostQuitMessage.Call(uintptr(int32(0)))
-		fallthrough
-	case WM_ENDSESSION:
-		fmt.Println("WM_ENDSESSION received")
-		removeTrayIcon(hwnd)
+		removeTrayIcon(hWnd)
+		postQuitMessage(0)
 	case WM_TRAYICON: // WM_USER + 1
 		// is this breaking the application?
 		switch lParam {
@@ -306,8 +318,12 @@ func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uin
 				fmt.Println("no listener on OpenUI command")
 			}
 		case IDM_EXIT:
-			log.Println("Exit clicked")
-			postMessage(hwnd, WM_CLOSE, 0, 0)
+			select {
+			case commands <- "Exit":
+			// should not happen but in case not listening
+			default:
+				fmt.Println("no listener on Exit command")
+			}
 		default:
 			fmt.Println("Unknown command received")
 		}
