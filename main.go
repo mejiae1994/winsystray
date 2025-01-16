@@ -162,14 +162,14 @@ func postMessage(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) bool {
 	return ret != 0
 }
 
-func getMessage(msg *winMsg, hWnd windows.HWND, min, max uint32) int {
-	ret, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(msg)), uintptr(hWnd), uintptr(min), uintptr(max))
+func getMessage(msg *winMsg, hwnd windows.HWND, filterMin, filterMax uint32) int {
+	ret, _, _ := procGetMessage.Call(uintptr(unsafe.Pointer(msg)), uintptr(hwnd), uintptr(filterMin), uintptr(filterMax))
 	return int(ret)
 }
 
 func runMessageLoop() {
 	msg := &winMsg{}
-	for getMessage(msg, hWnd, 0, 0) > 0 {
+	for getMessage(msg, 0, 0, 0) > 0 {
 		TranslateMessage(msg)
 		DispatchMessage(msg)
 	}
@@ -250,32 +250,14 @@ func main() {
 					// }
 				} else if cmd == "Exit" {
 					fmt.Println("Command to exit received")
-					sucess := postMessage(hWnd, WM_CLOSE, 0, 0)
-					if !sucess {
-						fmt.Println("PostMessage to close window failed")
-					}
-
-					if hWnd != 0 {
-						removeTrayIcon(hWnd)
-						destroyWindow(hWnd)
-						os.Exit(0)
-					}
+					quit()
 					return
 
 				}
 			case <-signals:
 				//send window handle a message to close the message loop
 				fmt.Println("Signal received")
-				sucess := postMessage(hWnd, WM_CLOSE, 0, 0)
-				if !sucess {
-					fmt.Println("PostMessage to close window failed")
-				}
-
-				if hWnd != 0 {
-					removeTrayIcon(hWnd)
-					destroyWindow(hWnd)
-					os.Exit(0)
-				}
+				quit()
 				return
 			}
 		}
@@ -310,7 +292,6 @@ func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uin
 	case WM_COMMAND:
 		switch int32(wParam) {
 		case IDM_OPEN_UI:
-			fmt.Printf("opened the UI")
 			select {
 			case commands <- "OpenUI":
 			// should not happen but in case not listening
@@ -563,4 +544,16 @@ func showNotification(hwnd windows.HWND, title, message string) error {
 	}
 
 	return nil
+}
+
+func quit() {
+	if !postMessage(hWnd, WM_CLOSE, 0, 0) {
+		fmt.Println("PostMessage to close window failed")
+	}
+
+	if hWnd != 0 {
+		removeTrayIcon(hWnd)
+		destroyWindow(hWnd)
+		os.Exit(0)
+	}
 }
