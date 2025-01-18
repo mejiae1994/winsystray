@@ -36,6 +36,7 @@ const (
 	WM_ENDSESSION   = 0x0016
 
 	// Additional Windows constants
+	WM_QUIT      = 0x0012
 	WM_DESTROY   = 0x0002
 	WM_CLOSE     = 0x0010
 	WM_NULL      = 0x0000
@@ -96,6 +97,7 @@ var (
 	hWnd                    windows.HWND
 	mu                      sync.Mutex
 	commands                chan string
+	running                 bool
 )
 
 // POINT represents a Windows POINT structure
@@ -169,9 +171,18 @@ func getMessage(msg *winMsg, hwnd windows.HWND, filterMin, filterMax uint32) int
 
 func runMessageLoop() {
 	msg := &winMsg{}
-	for getMessage(msg, 0, 0, 0) > 0 {
-		TranslateMessage(msg)
-		DispatchMessage(msg)
+	for running {
+		if getMessage(msg, 0, 0, 0) > 0 {
+
+			if msg.Message == WM_QUIT {
+				break
+			}
+
+			TranslateMessage(msg)
+			DispatchMessage(msg)
+		} else {
+			break
+		}
 	}
 }
 
@@ -262,7 +273,7 @@ func main() {
 			}
 		}
 	}()
-
+	running = true
 	runMessageLoop()
 }
 
@@ -274,8 +285,7 @@ func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uin
 	switch msg {
 	case WM_DESTROY:
 		fmt.Println("WM_DESTROY received")
-		removeTrayIcon(hWnd)
-		postQuitMessage(0)
+		running = false
 	case WM_TRAYICON: // WM_USER + 1
 		// is this breaking the application?
 		switch lParam {
@@ -310,7 +320,7 @@ func wndProc(hwnd windows.HWND, msg uint32, wParam, lParam uintptr) (lResult uin
 		}
 	case WM_CLOSE:
 		fmt.Println("WM_CLOSE received")
-		destroyWindow(hWnd)
+		running = false
 	default:
 		lResult = defWindowProc(hwnd, msg, wParam, lParam)
 	}
